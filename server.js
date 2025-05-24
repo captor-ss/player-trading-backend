@@ -59,7 +59,7 @@ app.post('/api/bids', async (req, res) => {
     .from('players')
     .update({
       bids: [...player.bids, newBid],
-      bidding_ends_at: new Date(Date.now() + 60 * 1000).toISOString() // Add this line
+      bidding_ends_at: new Date(Date.now() + 60 * 1000).toISOString() // Ensure this line exists
     })
     .eq('id', playerId);
   if (error) return res.status(500).json({ error: error.message });
