@@ -45,29 +45,27 @@ app.post('/api/bids', async (req, res) => {
     .select('*')
     .eq('id', playerId)
     .single();
-  if (playerError || !player) return res.status(404).json({ error: 'Player not found' });
-
+  if (playerError) return res.status(500).json({ error: playerError.message });
+  if (player.bids.length > 0) return res.status(400).json({ error: 'Bids already placed' });
   const { data: team, error: teamError } = await supabase
     .from('teams')
-    .select('*')
+    .select('budget')
     .eq('id', teamId)
     .single();
-  if (teamError || !team) return res.status(404).json({ error: 'Team not found' });
-  if (amount > team.budget) return res.status(400).json({ error: 'Bid exceeds team budget' });
-
-  const bids = player.bids || [];
-  bids.push({ teamId, amount, timestamp: new Date().toISOString() });
-  const biddingEndsAt = new Date(Date.now() + 60 * 1000); // 1 minute for demo
-
+  if (teamError) return res.status(500).json({ error: teamError.message });
+  if (team.budget < amount) return res.status(400).json({ error: 'Insufficient budget' });
+  const newBid = { teamId, amount, timestamp: new Date().toISOString() };
   const { error } = await supabase
     .from('players')
-    .update({ bids, bidding_ends_at: biddingEndsAt })
+    .update({
+      bids: [...player.bids, newBid],
+      bidding_ends_at: new Date(Date.now() + 60 * 1000).toISOString() // Add this line
+    })
     .eq('id', playerId);
   if (error) return res.status(500).json({ error: error.message });
-
-  await supabase.from('action_log').insert({
-    action: `Bid placed on ${player.name} by team ${team.name} for $${amount}`,
-  });
+  await supabase
+    .from('action_log')
+    .insert({ action: `Bid placed on ${player.name} by team ${teamId} for $${amount}` });
   res.json({ message: 'Bid placed' });
 });
 
