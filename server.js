@@ -79,7 +79,7 @@ app.post('/api/resolve-bids', async (req, res) => {
     .single();
   if (playerError) return res.status(500).json({ error: playerError.message });
   const now = new Date();
-  const biddingEndsAt = player.bidding_ends_at ? new Date(player.bidding_ends_at) : now;
+const biddingEndsAt = player.bidding_ends_at ? new Date(player.bidding_ends_at) : now;
   if (biddingEndsAt > now) {
     return res.status(400).json({ error: 'Bidding still active' });
   }
@@ -111,6 +111,30 @@ app.post('/api/resolve-bids', async (req, res) => {
     .update({ budget: supabase.sql`budget - ${highestBid}` })
     .eq('id', winningBid.teamId);
   res.json({ message: 'Offer created' });
+});
+
+// Cancel bid
+app.post('/api/cancel-bid', async (req, res) => {
+  const { playerId, teamId } = req.body;
+  const { data: player, error: playerError } = await supabase
+    .from('players')
+    .select('*')
+    .eq('id', playerId)
+    .single();
+  if (playerError) return res.status(500).json({ error: playerError.message });
+  if (!player.bids.length) return res.status(400).json({ error: 'No bids to cancel' });
+  const teamBid = player.bids.find(bid => bid.teamId === teamId);
+  if (!teamBid) return res.status(400).json({ error: 'No bid from this team' });
+  const updatedBids = player.bids.filter(bid => bid.teamId !== teamId);
+  const { error } = await supabase
+    .from('players')
+    .update({ bids: updatedBids, bidding_ends_at: null })
+    .eq('id', playerId);
+  if (error) return res.status(500).json({ error: error.message });
+  await supabase
+    .from('action_log')
+    .insert({ action: `Bid cancelled on ${player.name} by team ${teamId}` });
+  res.json({ message: 'Bid cancelled' });
 });
 
 // Accept offer
