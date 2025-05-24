@@ -32,7 +32,10 @@ app.get('/api/offers', async (req, res) => {
 
 // Get all managers
 app.get('/api/managers', async (req, res) => {
-  const { data, error } = await supabase.from('managers').select('*, team:teams(*)');
+  const { data, error } = await supabase
+    .from('managers')
+    .select('id, name, team_id, team:teams(id, name)')
+    .order('id');
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
