@@ -199,6 +199,58 @@ app.get('/api/log', async (req, res) => {
   res.json(data);
 });
 
+// Add player
+app.post('/api/admin/add-player', async (req, res) => {
+  const { name, salary, teamId } = req.body;
+  if (!name || !salary || salary < 0) return res.status(400).json({ error: 'Invalid player data' });
+  const { data, error } = await supabase
+    .from('players')
+    .insert({ name, salary, team_id: teamId || null, bids: [], bidding_ends_at: null })
+    .select()
+    .single();
+  if (error) return res.status(500).json({ error: error.message });
+  await supabase
+    .from('action_log')
+    .insert({ action: `Player ${name} added by admin` });
+  res.json({ message: 'Player added' });
+});
+
+// Salary update
+app.post('/api/admin/update-salary', async (req, res) => {
+  const { playerId, newSalary } = req.body;
+  if (!playerId || !newSalary || newSalary < 0) return res.status(400).json({ error: 'Invalid data' });
+  const { error } = await supabase
+    .from('players')
+    .update({ salary: newSalary })
+    .eq('id', playerId);
+  if (error) return res.status(500).json({ error: error.message });
+  await supabase
+    .from('action_log')
+    .insert({ action: `Salary updated for player ID ${playerId} to $${newSalary}` });
+  res.json({ message: 'Salary updated' });
+});
+
+// Manager signup
+app.post('/api/managers/signup', async (req, res) => {
+  const { name, password, teamId } = req.body;
+  if (!name || !password || !teamId) return res.status(400).json({ error: 'All fields required' });
+  const { data: existing, error: existsError } = await supabase
+    .from('managers')
+    .select('id')
+    .eq('name', name)
+    .single();
+  if (existsError && existsError.code !== 'PGRST116') return res.status(500).json({ error: existsError.message });
+  if (existing) return res.status(400).json({ error: 'Manager already exists' });
+  const { data, error } = await supabase
+    .from('managers')
+    .insert({ name, password, team_id: teamId })
+    .select()
+    .single();
+  if (error) return res.status(500).json({ error: error.message });
+  delete data.password;
+  res.json({ message: 'Manager signed up successfully' });
+});
+
 // Verify manager
 app.post('/api/managers/verify', async (req, res) => {
   const { name, password } = req.body;
