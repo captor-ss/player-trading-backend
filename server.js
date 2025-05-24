@@ -79,7 +79,7 @@ app.post('/api/resolve-bids', async (req, res) => {
     .single();
   if (playerError) return res.status(500).json({ error: playerError.message });
   const now = new Date();
-  const biddingEndsAt = player.bidding_ends_at ? new Date(player.bidding_ends_at) : now; // Treat null as expired
+  const biddingEndsAt = player.bidding_ends_at ? new Date(player.bidding_ends_at) : now;
   if (biddingEndsAt > now) {
     return res.status(400).json({ error: 'Bidding still active' });
   }
