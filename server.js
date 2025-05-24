@@ -74,34 +74,42 @@ app.post('/api/resolve-bids', async (req, res) => {
   const { playerId } = req.body;
   const { data: player, error: playerError } = await supabase
     .from('players')
-    .select('*, team:teams(*)')
+    .select('*')
     .eq('id', playerId)
     .single();
-  if (playerError || !player) return res.status(404).json({ error: 'Player not found' });
-
-  if (player.bidding_ends_at && new Date(player.bidding_ends_at) > new Date()) {
+  if (playerError) return res.status(500).json({ error: playerError.message });
+  const now = new Date();
+  const biddingEndsAt = player.bidding_ends_at ? new Date(player.bidding_ends_at) : now; // Treat null as expired
+  if (biddingEndsAt > now) {
     return res.status(400).json({ error: 'Bidding still active' });
   }
-
-  const bids = player.bids || [];
-  if (bids.length === 0) return res.status(400).json({ error: 'No bids' });
-
-  const highestBid = bids.reduce((max, bid) => (bid.amount > max.amount ? bid : max), bids[0]);
-  const expiresAt = new Date(Date.now() + 60 * 1000); // 1 minute for demo
-
-  const { error: offerError } = await supabase.from('offers').insert({
-    player_id: playerId,
-    team_id: highestBid.teamId,
-    bid_amount: highestBid.amount,
-    expires_at: expiresAt,
-    status: 'pending',
-  });
+  if (player.bids.length === 0) {
+    return res.status(400).json({ error: 'No bids to resolve' });
+  }
+  const highestBid = Math.max(...player.bids.map(bid => bid.amount));
+  const winningBid = player.bids.find(bid => bid.amount === highestBid);
+  const { error: updateError } = await supabase
+    .from('players')
+    .update({ team_id: winningBid.teamId, salary: highestBid, bids: [], bidding_ends_at: null })
+    .eq('id', playerId);
+  if (updateError) return res.status(500).json({ error: updateError.message });
+  const { error: offerError } = await supabase
+    .from('offers')
+    .insert({
+      player_id: playerId,
+      team_id: winningBid.teamId,
+      bid_amount: highestBid,
+      expires_at: new Date(now.getTime() + 60 * 1000).toISOString(),
+      status: 'pending'
+    });
   if (offerError) return res.status(500).json({ error: offerError.message });
-
-  await supabase.from('action_log').insert({
-    action: `Offer created for ${player.name} to team ${highestBid.teamId} for $${highestBid.amount}`,
-  });
-  await supabase.from('players').update({ bids: [], bidding_ends_at: null }).eq('id', playerId);
+  await supabase
+    .from('action_log')
+    .insert({ action: `Offer created for ${player.name} to team ${winningBid.teamId} for $${highestBid}` });
+  await supabase
+    .from('teams')
+    .update({ budget: supabase.sql`budget - ${highestBid}` })
+    .eq('id', winningBid.teamId);
   res.json({ message: 'Offer created' });
 });
 
