@@ -204,11 +204,13 @@ app.post('/api/managers/verify', async (req, res) => {
   const { name, password } = req.body;
   const { data, error } = await supabase
     .from('managers')
-    .select('*, team:teams(*)')
+    .select('id, name, password, team_id, team:teams(id, name)')
     .eq('name', name)
-    .eq('password', password)
     .single();
   if (error || !data) return res.status(401).json({ error: 'Invalid credentials' });
+  // For now, compare plain text (add hashing later for security)
+  if (data.password !== password) return res.status(401).json({ error: 'Invalid credentials' });
+  delete data.password; // Remove password from response
   res.json(data);
 });
 
