@@ -286,7 +286,7 @@ app.post('/api/admin/manage-manager', async (req, res) => {
   if (!req.headers['admin-auth'] || req.headers['admin-auth'] !== 'true') {
     return sendError(res, 403, 'Admin access required');
   }
-  const { action, managerId, playerId } = req.body;
+  const { action, managerId, playerId, teamId } = req.body;
   try {
     if (action === 'remove') {
       const manager = await fetchSingle('managers', { id: managerId }, 'id, name');
@@ -294,15 +294,15 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       await logAction(`Manager ${manager.name} removed by admin`);
       res.json({ message: `Manager ${manager.name} removed` });
     } else if (action === 'nominate') {
-      const player = await fetchSingle('players', { id: playerId }, 'id, name, team_id');
-      if (!player.team_id) return sendError(res, 400, 'Player must be on a team');
-      const { data: currentManager } = await supabase.from('managers').select('id, name').eq('team_id', player.team_id).single();
+      if (!playerId || !teamId) return sendError(res, 400, 'Player and team are required');
+      const player = await fetchSingle('players', { id: playerId }, 'id, name');
+      const { data: currentManager } = await supabase.from('managers').select('id, name').eq('team_id', teamId).single();
       if (currentManager) {
         await supabase.from('managers').update({ team_id: null }).eq('id', currentManager.id);
       }
-      await supabase.from('managers').update({ team_id: player.team_id }).eq('name', player.name);
-      await logAction(`Player ${player.name} nominated as manager for team ${player.team_id} by admin`);
-      res.json({ message: `Player ${player.name} nominated as manager` });
+      await supabase.from('managers').upsert({ name: player.name, team_id: teamId }, { onConflict: 'name' });
+      await logAction(`Player ${player.name} nominated as manager for team ${teamId} by admin`);
+      res.json({ message: `Player ${player.name} nominated as manager for team ${teamId}` });
     } else {
       sendError(res, 400, 'Invalid action');
     }
