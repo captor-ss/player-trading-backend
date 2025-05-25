@@ -437,7 +437,26 @@ app.get('/api/counts', async (req, res) => {
       .select('id', { count: 'exact' });
     if (managerError) throw new Error(managerError.message);
 
-    res.json({ playerCount: players.length, managerCount: managers.length });
+    const { data: bids, error: bidError } = await supabase
+      .from('bids')
+      .select('id', { count: 'exact' });
+    if (bidError) throw new Error(bidError.message);
+
+    const { data: latestLog, error: logError } = await supabase
+      .from('action_log')
+      .select('action, timestamp')
+      .order('timestamp', { ascending: false })
+      .limit(1)
+      .single();
+    if (logError) throw new Error(logError.message);
+    const lastActive = latestLog.action.match(/Manager ID (\d+)/)?.[1] || 'N/A';
+
+    res.json({
+      playerCount: players.length,
+      managerCount: managers.length,
+      totalBids: bids.length,
+      lastActive
+    });
   } catch (error) {
     res.status(500).json({ error: `Failed to fetch counts: ${error.message}` });
   }
