@@ -315,7 +315,8 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       const player = await fetchSingle('players', { id: playerId }, 'id, name');
       
       // Check if the player is already a manager
-      const { data: existingManager } = await supabase.from('managers').select('id').eq('name', player.name).maybeSingle();
+      const { data: existingManager, error: managerError } = await supabase.from('managers').select('id').eq('name', player.name).maybeSingle();
+      if (managerError) throw new Error(`Manager query failed: ${managerError.message}`);
       let newManagerId;
       if (!existingManager) {
         const { data: newManager, error: insertError } = await supabase.from('managers').insert({ name: player.name }).select('id').single();
@@ -327,12 +328,15 @@ app.post('/api/admin/manage-manager', async (req, res) => {
 
       // Find an available team (not assigned to any manager)
       const { data: managersWithTeams } = await supabase.from('managers').select('team_id').not('team_id', 'is', null);
-      const assignedTeamIds = managersWithTeams.map(m => m.team_id);
-      const { data: availableTeam } = await supabase
+      const assignedTeamIds = managersWithTeams.map(m => m.team_id) || [];
+      console.log('Assigned Team IDs:', assignedTeamIds); // Debug log
+      const { data: availableTeam, error: teamQueryError } = await supabase
         .from('teams')
         .select('id')
         .not('id', 'in', `(${assignedTeamIds.length ? assignedTeamIds.join(',') : '0'})`)
         .maybeSingle();
+      if (teamQueryError) throw new Error(`Team query failed: ${teamQueryError.message}`);
+      console.log('Available Team:', availableTeam); // Debug log
 
       let teamId;
       if (availableTeam) {
@@ -345,6 +349,7 @@ app.post('/api/admin/manage-manager', async (req, res) => {
           .select('id')
           .single();
         if (teamInsertError) throw new Error(`Failed to create team: ${teamInsertError.message}`);
+        console.log('New Team Created:', newTeam); // Debug log
         teamId = newTeam.id;
       }
 
@@ -358,6 +363,7 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       sendError(res, 400, 'Invalid action');
     }
   } catch (error) {
+    console.error('Error Details:', error); // Debug log
     sendError(res, 500, error.message);
   }
 });
