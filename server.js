@@ -132,7 +132,7 @@ app.get('/api/managers/:id', async (req, res) => {
   try {
     const manager = await fetchSingle('managers', { id: req.params.id }, `
       *,
-      team:teams(id, name, budget, players:players(*))
+      team:teams(id, name, budget, players:players(id, name, salary))
     `);
     const { data: transactions } = await supabase.from('action_log').select('*').order('id', { ascending: false });
     manager.transactions = transactions.map(t => ({
@@ -180,6 +180,23 @@ app.post('/api/manager/nominate', async (req, res) => {
     await supabase.from('managers').update({ team_id: manager.team_id }).eq('name', player.name);
     await logAction(`Manager ${manager.name} nominated ${player.name} as new manager for team ${manager.team_id}`);
     res.json({ message: `Nominated ${player.name} as new manager` });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.post('/api/managers/set-team-name', async (req, res) => {
+  const { managerId, teamName } = req.body;
+  if (!req.headers['manager-id'] || req.headers['manager-id'] !== String(managerId)) {
+    return sendError(res, 403, 'Unauthorized manager action');
+  }
+  try {
+    const manager = await fetchSingle('managers', { id: managerId }, 'id, name, team_id');
+    if (!manager.team_id) return sendError(res, 400, 'Manager has no team assigned');
+    const { error } = await supabase.from('teams').update({ name: teamName }).eq('id', manager.team_id);
+    if (error) throw new Error(error.message);
+    await logAction(`Manager ${manager.name} set team name to ${teamName}`);
+    res.json({ message: `Team name set to ${teamName}` });
   } catch (error) {
     sendError(res, 500, error.message);
   }
@@ -286,7 +303,7 @@ app.post('/api/admin/manage-manager', async (req, res) => {
   if (!req.headers['admin-auth'] || req.headers['admin-auth'] !== 'true') {
     return sendError(res, 403, 'Admin access required');
   }
-  const { action, managerId, playerId, teamId } = req.body;
+  const { action, managerId, playerId } = req.body;
   try {
     if (action === 'remove') {
       const manager = await fetchSingle('managers', { id: managerId }, 'id, name');
@@ -294,15 +311,21 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       await logAction(`Manager ${manager.name} removed by admin`);
       res.json({ message: `Manager ${manager.name} removed` });
     } else if (action === 'nominate') {
-      if (!playerId || !teamId) return sendError(res, 400, 'Player and team are required');
+      if (!playerId) return sendError(res, 400, 'Player is required');
       const player = await fetchSingle('players', { id: playerId }, 'id, name');
-      const { data: currentManager } = await supabase.from('managers').select('id, name').eq('team_id', teamId).single();
-      if (currentManager) {
-        await supabase.from('managers').update({ team_id: null }).eq('id', currentManager.id);
+      const { data: existingManager } = await supabase.from('managers').select('id').eq('name', player.name).single();
+      let managerId;
+      if (!existingManager) {
+        const { data: newManager } = await supabase.from('managers').insert({ name: player.name }).select('id').single();
+        managerId = newManager.id;
+      } else {
+        managerId = existingManager.id;
       }
-      await supabase.from('managers').upsert({ name: player.name, team_id: teamId }, { onConflict: 'name' });
-      await logAction(`Player ${player.name} nominated as manager for team ${teamId} by admin`);
-      res.json({ message: `Player ${player.name} nominated as manager for team ${teamId}` });
+      const { data: availableTeam } = await supabase.from('teams').select('id').is('manager_id', null).limit(1).single();
+      if (!availableTeam) return sendError(res, 400, 'No available teams for assignment');
+      await supabase.from('managers').update({ team_id: availableTeam.id }).eq('id', managerId);
+      await logAction(`Player ${player.name} nominated as manager by admin for team ${availableTeam.id}`);
+      res.json({ message: `Player ${player.name} nominated as manager` });
     } else {
       sendError(res, 400, 'Invalid action');
     }
@@ -314,20 +337,18 @@ app.post('/api/admin/manage-manager', async (req, res) => {
 app.post('/api/bids', async (req, res) => {
   const { playerId, teamId, amount } = req.body;
   try {
-    const player = await fetchSingle('players', { id: playerId });
-    if (player.bids?.length) return sendError(res, 400, 'Bids already placed');
-    const team = await fetchSingle('teams', { id: teamId }, 'budget');
+    const player = await fetchSingle('players', { id: playerId }, 'id, name, team_id');
+    if (player.team_id) return sendError(res, 400, 'Player already on a team');
+    const team = await fetchSingle('teams', { id: teamId }, 'id, name, budget');
     if (team.budget < amount) return sendError(res, 400, 'Insufficient budget');
-    const { error } = await supabase
-      .from('bids')
-      .insert({ player_id: playerId, team_id: teamId, amount });
+    const { data: existingBid } = await supabase.from('bids').select('id').eq('player_id', playerId).eq('team_id', teamId).single();
+    if (existingBid) return sendError(res, 400, 'Bid already placed by this team');
+    const { error } = await supabase.from('bids').insert({ player_id: playerId, team_id: teamId, amount, status: 'pending' });
     if (error) throw new Error(error.message);
-    await supabase
-      .from('players')
-      .update({ bidding_ends_at: new Date(Date.now() + 60 * 1000).toISOString() })
-      .eq('id', playerId);
+    const biddingEndsAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    await supabase.from('players').update({ bidding_ends_at: biddingEndsAt }).eq('id', playerId);
     await logAction(`Bid placed on ${player.name} by team ${teamId} for $${amount}`);
-    res.json({ message: 'Bid placed' });
+    res.json({ message: 'Bid placed successfully' });
   } catch (error) {
     sendError(res, 500, error.message);
   }
@@ -336,22 +357,16 @@ app.post('/api/bids', async (req, res) => {
 app.post('/api/cancel-bid', async (req, res) => {
   const { playerId, teamId } = req.body;
   try {
-    const player = await fetchSingle('players', { id: playerId });
-    if (!player.bids?.length) return sendError(res, 400, 'No bids to cancel');
-    const teamBid = player.bids.find(bid => bid.teamId === teamId);
-    if (!teamBid) return sendError(res, 400, 'No bid from this team');
-    const { error } = await supabase
-      .from('bids')
-      .delete()
-      .eq('player_id', playerId)
-      .eq('team_id', teamId);
-    if (error) throw new Error(error.message);
-    await supabase
-      .from('players')
-      .update({ bidding_ends_at: null })
-      .eq('id', playerId);
+    const player = await fetchSingle('players', { id: playerId }, 'id, name');
+    const { data: bid } = await supabase.from('bids').select('id').eq('player_id', playerId).eq('team_id', teamId).single();
+    if (!bid) return sendError(res, 400, 'No bid from this team');
+    await supabase.from('bids').delete().eq('player_id', playerId).eq('team_id', teamId);
+    const { data: remainingBids } = await supabase.from('bids').select('id').eq('player_id', playerId);
+    if (!remainingBids.length) {
+      await supabase.from('players').update({ bidding_ends_at: null }).eq('id', playerId);
+    }
     await logAction(`Bid cancelled on ${player.name} by team ${teamId}`);
-    res.json({ message: 'Bid cancelled' });
+    res.json({ message: 'Bid cancelled successfully' });
   } catch (error) {
     sendError(res, 500, error.message);
   }
@@ -363,35 +378,26 @@ app.post('/api/bids/accept', async (req, res) => {
     const bid = await fetchSingle('bids', { id: bidId }, 'id, amount, team_id, team:teams(name)');
     const player = await fetchSingle('players', { id: playerId }, 'id, name, salary, team_id');
     if (bid.amount <= player.salary) return sendError(res, 400, 'Bid must exceed current salary');
-    const { error } = await supabase
-      .from('players')
-      .update({ team_id: bid.team_id, salary: bid.amount, bidding_ends_at: null })
-      .eq('id', playerId);
-    if (error) throw new Error(error.message);
-    await supabase
-      .from('bids')
-      .update({ status: 'accepted' })
-      .eq('id', bidId);
-    await supabase
-      .from('teams')
-      .update({ budget: supabase.sql`budget - ${bid.amount}` })
-      .eq('id', bid.team_id);
-    await logAction(`Player ${player.name} accepted bid $${bid.amount} from ${bid.team.name}`);
-    res.json({ message: 'Bid accepted, player assigned', timestamp: new Date().toISOString() });
+    const team = await fetchSingle('teams', { id: bid.team_id }, 'id, name, budget');
+    if (team.budget < bid.amount) return sendError(res, 400, 'Team budget too low');
+    await supabase.from('players').update({ team_id: bid.team_id, salary: bid.amount, bidding_ends_at: null }).eq('id', playerId);
+    await supabase.from('teams').update({ budget: supabase.sql`budget - ${bid.amount}` }).eq('id', bid.team_id);
+    await supabase.from('bids').delete().eq('player_id', playerId);
+    await logAction(`Player ${player.name} accepted bid of $${bid.amount} from ${team.name}`);
+    res.json({ message: 'Bid accepted, player assigned' });
   } catch (error) {
-    sendError(res, error.message.includes('not found') ? 404 : 500, error.message);
+    sendError(res, 500, error.message);
   }
 });
 
 app.post('/api/bids/reject', async (req, res) => {
   const { bidId, playerId } = req.body;
   try {
-    const { error } = await supabase
-      .from('bids')
-      .update({ status: 'rejected' })
-      .eq('id', bidId)
-      .eq('player_id', playerId);
-    if (error) return sendError(res, 500, error.message);
+    await supabase.from('bids').delete().eq('id', bidId);
+    const { data: remainingBids } = await supabase.from('bids').select('id').eq('player_id', playerId);
+    if (!remainingBids.length) {
+      await supabase.from('players').update({ bidding_ends_at: null }).eq('id', playerId);
+    }
     await logAction(`Player rejected bid ID ${bidId}`);
     res.json({ message: 'Bid rejected' });
   } catch (error) {
@@ -399,4 +405,5 @@ app.post('/api/bids/reject', async (req, res) => {
   }
 });
 
-app.listen(process.env.PORT || 3000, () => console.log(`Server running on port ${process.env.PORT || 3000}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
