@@ -148,10 +148,22 @@ app.get('/api/managers/:id', async (req, res) => {
 app.post('/api/managers/verify', async (req, res) => {
   const { name, password } = req.body;
   try {
-    const manager = await fetchSingle('managers', { name, password }, 'id, name');
+    if (!name || !password) {
+      return sendError(res, 400, 'Name and password are required');
+    }
+    const { data: manager, error } = await supabase
+      .from('managers')
+      .select('id, name, team_id, team:teams(name, budget, players)')
+      .eq('name', name)
+      .eq('password', password)
+      .single();
+    if (error || !manager) {
+      return sendError(res, 401, 'Invalid credentials');
+    }
+    await logAction(`Manager ${name} logged in`);
     res.json(manager);
   } catch (error) {
-    sendError(res, 401, error.message);
+    sendError(res, 500, `Error verifying manager: ${error.message}`);
   }
 });
 
@@ -318,8 +330,9 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       const { data: existingManager, error: managerError } = await supabase.from('managers').select('id').eq('name', player.name).maybeSingle();
       if (managerError) throw new Error(`Manager query failed: ${managerError.message}`);
       let newManagerId;
+      let defaultPassword = null;
       if (!existingManager) {
-        const defaultPassword = 'defaultPass123'; // Temporary password for new managers
+        defaultPassword = 'defaultPass123'; // Temporary password for new managers
         const { data: newManager, error: insertError } = await supabase
           .from('managers')
           .insert({ name: player.name, password: defaultPassword })
@@ -363,9 +376,17 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       // Assign the team to the manager
       const { error: updateError } = await supabase.from('managers').update({ team_id: teamId }).eq('id', newManagerId);
       if (updateError) throw new Error(`Failed to assign team: ${updateError.message}`);
+      console.log(`Manager ${player.name} assigned to team ${teamId}`); // Debug log
+
+      // Fetch the assigned team name for confirmation
+      const { data: assignedTeam } = await supabase.from('teams').select('name').eq('id', teamId).single();
+      console.log(`Assigned Team Name for ${player.name}:`, assignedTeam.name); // Debug log
 
       await logAction(`Player ${player.name} nominated as manager by admin for team ${teamId}`);
-      res.json({ message: `Player ${player.name} nominated as manager. Temporary password: ${defaultPassword}` });
+      const message = defaultPassword
+        ? `Player ${player.name} nominated as manager. Temporary password: ${defaultPassword}`
+        : `Player ${player.name} nominated as manager (already had credentials).`;
+      res.json({ message });
     } else {
       sendError(res, 400, 'Invalid action');
     }
