@@ -326,7 +326,26 @@ app.get('/api/teams', async (req, res) => {
     .from('teams')
     .select('id, name, budget');
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  res.json(data || []); // Return empty array if no teams
+});
+
+// API counts
+app.get('/api/counts', async (req, res) => {
+  try {
+    const { data: players, error: playerError } = await supabase
+      .from('players')
+      .select('id', { count: 'exact' });
+    if (playerError) throw new Error(playerError.message);
+
+    const { data: managers, error: managerError } = await supabase
+      .from('managers')
+      .select('id', { count: 'exact' });
+    if (managerError) throw new Error(managerError.message);
+
+    res.json({ playerCount: players.length, managerCount: managers.length });
+  } catch (error) {
+    res.status(500).json({ error: `Failed to fetch counts: ${error.message}` });
+  }
 });
 
 app.listen(process.env.PORT || 3000, () => {
