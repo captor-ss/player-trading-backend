@@ -23,6 +23,21 @@ app.get('/api/players', async (req, res) => {
   res.json(data);
 });
 
+// Verify players
+app.post('/api/players/verify', async (req, res) => {
+  const { name, password } = req.body;
+  const { data, error } = await supabase
+    .from('players')
+    .select('id, name, salary, team_id, team:teams(id, name), bids')
+    .eq('name', name)
+    .eq('password', password)
+    .single();
+  if (error || !data) return res.status(401).json({ error: 'Invalid credentials' });
+  delete data.password; // Remove password from response
+  res.json(data);
+});
+
+
 // Get all offers
 app.get('/api/offers', async (req, res) => {
   const { data, error } = await supabase.from('offers').select('*, player:players(name, team_id), team:teams(name)');
@@ -201,11 +216,11 @@ app.get('/api/log', async (req, res) => {
 
 // Add player
 app.post('/api/admin/add-player', async (req, res) => {
-  const { name, salary, teamId } = req.body;
-  if (!name || !salary || salary < 0) return res.status(400).json({ error: 'Invalid player data' });
+  const { name, password, salary, teamId } = req.body;
+  if (!name || !password || !salary || salary < 0) return res.status(400).json({ error: 'Invalid player data' });
   const { data, error } = await supabase
     .from('players')
-    .insert({ name, salary, team_id: teamId || null, bids: [], bidding_ends_at: null })
+    .insert({ name, password, salary, team_id: teamId || null, bids: [], bidding_ends_at: null })
     .select()
     .single();
   if (error) return res.status(500).json({ error: error.message });
@@ -213,6 +228,45 @@ app.post('/api/admin/add-player', async (req, res) => {
     .from('action_log')
     .insert({ action: `Player ${name} added by admin` });
   res.json({ message: 'Player added' });
+});
+
+// Accept bid
+app.post('/api/bids/accept', async (req, res) => {
+  const { bidId, playerId } = req.body;
+  const { data: bid, error: bidError } = await supabase
+    .from('bids')
+    .select('id, amount, team_id, team:teams(name)')
+    .eq('id', bidId)
+    .single();
+  if (bidError || !bid) return res.status(404).json({ error: 'Bid not found' });
+  const { data: player, error: playerError } = await supabase
+    .from('players')
+    .select('id, salary, team_id')
+    .eq('id', playerId)
+    .single();
+  if (playerError || !player) return res.status(404).json({ error: 'Player not found' });
+  if (bid.amount <= player.salary) return res.status(400).json({ error: 'Bid must exceed current salary' });
+  const { error } = await supabase.rpc('accept_bid', { bid_id: bidId, player_id: playerId });
+  if (error) return res.status(500).json({ error: error.message });
+  await supabase
+    .from('action_log')
+    .insert({ action: `Player ${player.name} accepted bid $${bid.amount} from ${bid.team.name}` });
+  res.json({ message: 'Bid accepted, player assigned' });
+});
+
+// Reject bid
+app.post('/api/bids/reject', async (req, res) => {
+  const { bidId, playerId } = req.body;
+  const { error } = await supabase
+    .from('bids')
+    .delete()
+    .eq('id', bidId)
+    .eq('player_id', playerId);
+  if (error) return res.status(500).json({ error: error.message });
+  await supabase
+    .from('action_log')
+    .insert({ action: `Player rejected bid ID ${bidId}` });
+  res.json({ message: 'Bid rejected' });
 });
 
 // Salary update
