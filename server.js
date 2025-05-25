@@ -319,8 +319,14 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       if (managerError) throw new Error(`Manager query failed: ${managerError.message}`);
       let newManagerId;
       if (!existingManager) {
-        const { data: newManager, error: insertError } = await supabase.from('managers').insert({ name: player.name }).select('id').single();
+        const defaultPassword = 'defaultPass123'; // Temporary password for new managers
+        const { data: newManager, error: insertError } = await supabase
+          .from('managers')
+          .insert({ name: player.name, password: defaultPassword })
+          .select('id')
+          .single();
         if (insertError) throw new Error(`Failed to create manager: ${insertError.message}`);
+        console.log(`New manager created for ${player.name} with temporary password: ${defaultPassword}`); // Debug log
         newManagerId = newManager.id;
       } else {
         newManagerId = existingManager.id;
@@ -358,7 +364,7 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       if (updateError) throw new Error(`Failed to assign team: ${updateError.message}`);
 
       await logAction(`Player ${player.name} nominated as manager by admin for team ${teamId}`);
-      res.json({ message: `Player ${player.name} nominated as manager` });
+      res.json({ message: `Player ${player.name} nominated as manager. Temporary password: ${defaultPassword}` });
     } else {
       sendError(res, 400, 'Invalid action');
     }
