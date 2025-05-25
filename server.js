@@ -216,18 +216,25 @@ app.get('/api/log', async (req, res) => {
 
 // Add player
 app.post('/api/admin/add-player', async (req, res) => {
-  const { name, password, salary, teamId } = req.body;
-  if (!name || !password || !salary || salary < 0) return res.status(400).json({ error: 'Invalid player data' });
+  const { name, password, salary } = req.body;
+  const { data: manager, error: managerError } = await supabase
+    .from('managers')
+    .select('is_admin')
+    .eq('id', req.headers['manager-id'])
+    .single();
+  if (managerError || !manager.is_admin) return res.status(403).json({ error: 'Admin access required' });
+
   const { data, error } = await supabase
     .from('players')
-    .insert({ name, password, salary, team_id: teamId || null, bids: [], bidding_ends_at: null })
+    .insert({ name, password, salary })
     .select()
     .single();
   if (error) return res.status(500).json({ error: error.message });
+
   await supabase
     .from('action_log')
-    .insert({ action: `Player ${name} added by admin` });
-  res.json({ message: 'Player added' });
+    .insert({ action: `New player ${name} added by admin with salary $${salary}.` });
+  res.json({ message: 'Player added successfully.' });
 });
 
 // Accept bid
@@ -269,19 +276,73 @@ app.post('/api/bids/reject', async (req, res) => {
   res.json({ message: 'Bid rejected' });
 });
 
+// Player sell
+app.post('/api/players/sell', async (req, res) => {
+  const { playerId, teamId } = req.body;
+  const { data: player, error: playerError } = await supabase
+    .from('players')
+    .select('salary')
+    .eq('id', playerId)
+    .single();
+  if (playerError) return res.status(500).json({ error: playerError.message });
+
+  const salary = player.salary;
+  const fee = salary * 0.05;
+  const amountToAdd = salary - fee;
+
+  const { error: updatePlayerError } = await supabase
+    .from('players')
+    .update({ team_id: null, bidding_ends_at: null })
+    .eq('id', playerId);
+  if (updatePlayerError) return res.status(500).json({ error: updatePlayerError.message });
+
+  const { data: team, error: teamError } = await supabase
+    .from('teams')
+    .select('budget')
+    .eq('id', teamId)
+    .single();
+  if (teamError) return res.status(500).json({ error: teamError.message });
+
+  const newBudget = team.budget + amountToAdd;
+  const { error: updateTeamError } = await supabase
+    .from('teams')
+    .update({ budget: newBudget })
+    .eq('id', teamId);
+  if (updateTeamError) return res.status(500).json({ error: updateTeamError.message });
+
+  await supabase
+    .from('transactions')
+    .insert([
+      { manager_id: teamId, type: 'gain', amount: amountToAdd, description: `Sold player for $${salary} (after 5% fee)` },
+      { manager_id: teamId, type: 'loss', amount: fee, description: `5% fee for selling player` }
+    ]);
+
+  await supabase
+    .from('action_log')
+    .insert({ action: `Player ID ${playerId} was sold by Team ID ${teamId} for $${amountToAdd} (after 5% fee).` });
+  res.json({ message: `Player sold successfully. Team gained $${amountToAdd} after a 5% fee.` });
+});
+
 // Salary update
 app.post('/api/admin/update-salary', async (req, res) => {
   const { playerId, newSalary } = req.body;
-  if (!playerId || !newSalary || newSalary < 0) return res.status(400).json({ error: 'Invalid data' });
+  const { data: manager, error: managerError } = await supabase
+    .from('managers')
+    .select('is_admin')
+    .eq('id', req.headers['manager-id'])
+    .single();
+  if (managerError || !manager.is_admin) return res.status(403).json({ error: 'Admin access required' });
+
   const { error } = await supabase
     .from('players')
     .update({ salary: newSalary })
     .eq('id', playerId);
   if (error) return res.status(500).json({ error: error.message });
+
   await supabase
     .from('action_log')
-    .insert({ action: `Salary updated for player ID ${playerId} to $${newSalary}` });
-  res.json({ message: 'Salary updated' });
+    .insert({ action: `Salary for Player ID ${playerId} updated to $${newSalary} by admin.` });
+  res.json({ message: 'Salary updated successfully.' });
 });
 
 // Manager signup
@@ -318,6 +379,40 @@ app.post('/api/managers/verify', async (req, res) => {
   if (data.password !== password) return res.status(401).json({ error: 'Invalid credentials' });
   delete data.password; // Remove password from response
   res.json(data);
+});
+
+// Manager ID
+app.get('/api/managers/:id', async (req, res) => {
+  const { id } = req.params;
+  const { data: manager, error: managerError } = await supabase
+    .from('managers')
+    .select('*, team:teams(*, players:players(*))')
+    .eq('id', id)
+    .single();
+  if (managerError) return res.status(500).json({ error: managerError.message });
+
+  const { data: transactions, error: transactionError } = await supabase
+    .from('transactions')
+    .select('*')
+    .eq('manager_id', id);
+  if (transactionError) return res.status(500).json({ error: transactionError.message });
+
+  res.json({ ...manager, transactions });
+});
+
+// Manager quit
+app.post('/api/managers/quit', async (req, res) => {
+  const { managerId } = req.body;
+  const { error } = await supabase
+    .from('managers')
+    .delete()
+    .eq('id', managerId);
+  if (error) return res.status(500).json({ error: error.message });
+
+  await supabase
+    .from('action_log')
+    .insert({ action: `Manager with ID ${managerId} has quit.` });
+  res.json({ message: 'Successfully quit manager role.' });
 });
 
 // API teams
