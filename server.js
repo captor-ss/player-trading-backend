@@ -321,10 +321,18 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       } else {
         managerId = existingManager.id;
       }
+      // Check for an available team or create a new one
       const { data: availableTeam } = await supabase.from('teams').select('id').is('manager_id', null).limit(1).single();
-      if (!availableTeam) return sendError(res, 400, 'No available teams for assignment');
-      await supabase.from('managers').update({ team_id: availableTeam.id }).eq('id', managerId);
-      await logAction(`Player ${player.name} nominated as manager by admin for team ${availableTeam.id}`);
+      let teamId;
+      if (availableTeam) {
+        teamId = availableTeam.id;
+      } else {
+        const { data: newTeam } = await supabase.from('teams').insert({ name: `Team ${player.name}`, budget: 10000 }).select('id').single();
+        teamId = newTeam.id;
+      }
+      await supabase.from('managers').update({ team_id: teamId }).eq('id', managerId);
+      await supabase.from('teams').update({ manager_id: managerId }).eq('id', teamId);
+      await logAction(`Player ${player.name} nominated as manager by admin for team ${teamId}`);
       res.json({ message: `Player ${player.name} nominated as manager` });
     } else {
       sendError(res, 400, 'Invalid action');
