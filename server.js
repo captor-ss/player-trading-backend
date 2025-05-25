@@ -336,22 +336,23 @@ app.post('/api/admin/manage-manager', async (req, res) => {
       const { data: managersWithTeams } = await supabase.from('managers').select('team_id').not('team_id', 'is', null);
       const assignedTeamIds = managersWithTeams.map(m => m.team_id) || [];
       console.log('Assigned Team IDs:', assignedTeamIds); // Debug log
-      const { data: availableTeam, error: teamQueryError } = await supabase
+      const { data: availableTeams, error: teamQueryError } = await supabase
         .from('teams')
         .select('id')
-        .not('id', 'in', `(${assignedTeamIds.length ? assignedTeamIds.join(',') : '0'})`)
-        .maybeSingle();
+        .not('id', 'in', `(${assignedTeamIds.length ? assignedTeamIds.join(',') : '0'})`);
       if (teamQueryError) throw new Error(`Team query failed: ${teamQueryError.message}`);
-      console.log('Available Team:', availableTeam); // Debug log
+      console.log('Available Teams:', availableTeams); // Debug log
 
       let teamId;
-      if (availableTeam) {
-        teamId = availableTeam.id;
+      if (availableTeams && availableTeams.length > 0) {
+        teamId = availableTeams[0].id; // Take the first available team
       } else {
         // Create a new team with a starting budget of $500,000
+        const timestamp = Date.now();
+        const newTeamName = `Team ${player.name} ${timestamp}`; // Ensure unique name
         const { data: newTeam, error: teamInsertError } = await supabase
           .from('teams')
-          .insert({ name: `Team ${player.name}`, budget: 500000 })
+          .insert({ name: newTeamName, budget: 500000 })
           .select('id')
           .single();
         if (teamInsertError) throw new Error(`Failed to create team: ${teamInsertError.message}`);
