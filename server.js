@@ -320,6 +320,15 @@ app.post('/api/managers/verify', async (req, res) => {
   res.json(data);
 });
 
+// API teams
+app.get('/api/teams', async (req, res) => {
+  const { data, error } = await supabase
+    .from('teams')
+    .select('id, name, budget');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log(`Server running on port ${process.env.PORT || 3000}`);
 });
