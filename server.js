@@ -1,3 +1,316 @@
+const express = require('express');
+const { createClient } = require('@supabase/supabase-js');
+const cors = require('cors');
+require('dotenv').config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+const ADMIN_USERNAME = 'admin';
+const ADMIN_PASSWORD = 'admin123'; // Change to secure password in production
+
+const sendError = (res, status, message) => res.status(status).json({ error: message });
+
+const fetchSingle = async (table, conditions, select = '*') => {
+  const { data, error } = await supabase.from(table).select(select).match(conditions).single();
+  if (error || !data) throw new Error(error?.message || `${table} not found`);
+  return data;
+};
+
+const logAction = async (details) => {
+  const { error } = await supabase.from('action_log').insert({ details });
+  if (error) console.error('Error logging action:', error.message);
+};
+
+app.get('/api/players', async (req, res) => {
+  const { data, error } = await supabase.from('players').select(`
+    *,
+    team:teams(id, name)
+  `);
+  if (error) return sendError(res, 500, error.message);
+  res.json(data);
+});
+
+app.get('/api/players/:id', async (req, res) => {
+  try {
+    const player = await fetchSingle('players', { id: req.params.id }, '*, team:teams(id, name)');
+    res.json(player);
+  } catch (error) {
+    sendError(res, 404, error.message);
+  }
+});
+
+app.post('/api/players/verify', async (req, res) => {
+  const { name, password } = req.body;
+  try {
+    const player = await fetchSingle('players', { name, password }, 'id, name');
+    res.json(player);
+  } catch (error) {
+    sendError(res, 401, error.message);
+  }
+});
+
+app.post('/api/players/sell', async (req, res) => {
+  const { playerId, teamId } = req.body;
+  try {
+    const player = await fetchSingle('players', { id: playerId, team_id: teamId }, 'id, name, salary');
+    const fee = Math.round(player.salary * 0.05);
+    const amount = player.salary - fee;
+    await supabase.from('players').update({ team_id: null, salary: 0, bidding_ends_at: null }).eq('id', playerId);
+    await supabase.from('teams').update({ budget: supabase.sql`budget + ${amount}` }).eq('id', teamId);
+    await supabase.from('bids').delete().eq('player_id', playerId);
+    await logAction(`Player ${player.name} sold by team ${teamId} for $${amount} (fee: $${fee})`);
+    res.json({ message: `Player sold for $${amount} (fee: $${fee})` });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.get('/api/players/offers', async (req, res) => {
+  const { playerId } = req.query;
+  try {
+    const { data: bids } = await supabase.from('bids').select(`
+      id,
+      amount,
+      team:teams(id, name),
+      player:players(id, bidding_ends_at)
+    `).eq('player_id', playerId).eq('status', 'pending');
+    const offers = bids.map(bid => ({
+      teamId: bid.team.id,
+      teamName: bid.team.name,
+      amount: bid.amount,
+      expiresAt: bid.player.bidding_ends_at,
+    }));
+    res.json(offers);
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.post('/api/players/claim-offer', async (req, res) => {
+  const { playerId, teamId, amount } = req.body;
+  try {
+    const player = await fetchSingle('players', { id: playerId }, 'id, name, salary');
+    if (amount <= player.salary) return sendError(res, 400, 'Offer must exceed current salary');
+    const team = await fetchSingle('teams', { id: teamId }, 'id, name, budget');
+    if (team.budget < amount) return sendError(res, 400, 'Team budget too low');
+    await supabase.from('players').update({ team_id: teamId, salary: amount, bidding_ends_at: null }).eq('id', playerId);
+    await supabase.from('teams').update({ budget: supabase.sql`budget - ${amount}` }).eq('id', teamId);
+    await supabase.from('bids').delete().eq('player_id', playerId);
+    await logAction(`Player ${player.name} claimed offer of $${amount} from ${team.name}`);
+    res.json({ message: 'Offer claimed, player assigned' });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.post('/api/players/deny-offer', async (req, res) => {
+  const { playerId, teamId } = req.body;
+  try {
+    const { error } = await supabase.from('bids').delete().eq('player_id', playerId).eq('team_id', teamId);
+    if (error) return sendError(res, 500, error.message);
+    await logAction(`Player rejected offer from team ${teamId}`);
+    res.json({ message: 'Offer denied' });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.get('/api/managers', async (req, res) => {
+  const { data, error } = await supabase.from('managers').select(`
+    *,
+    team:teams(id, name, budget)
+  `);
+  if (error) return sendError(res, 500, error.message);
+  res.json(data);
+});
+
+app.get('/api/managers/:id', async (req, res) => {
+  try {
+    const manager = await fetchSingle('managers', { id: req.params.id }, `
+      *,
+      team:teams(id, name, budget, players:players(*))
+    `);
+    const { data: transactions } = await supabase.from('action_log').select('*').order('id', { ascending: false });
+    manager.transactions = transactions.map(t => ({
+      type: t.details.includes('sold') ? 'gain' : 'loss',
+      amount: parseInt(t.details.match(/\$\d+/)?.[0]?.replace('$', '') || '0'),
+    }));
+    res.json(manager);
+  } catch (error) {
+    sendError(res, 404, error.message);
+  }
+});
+
+app.post('/api/managers/verify', async (req, res) => {
+  const { name, password } = req.body;
+  try {
+    const manager = await fetchSingle('managers', { name, password }, 'id, name');
+    res.json(manager);
+  } catch (error) {
+    sendError(res, 401, error.message);
+  }
+});
+
+app.post('/api/managers/quit', async (req, res) => {
+  const { managerId } = req.body;
+  try {
+    const manager = await fetchSingle('managers', { id: managerId }, 'id, name');
+    await supabase.from('managers').update({ team_id: null }).eq('id', managerId);
+    await logAction(`Manager ${manager.name} quit their role`);
+    res.json({ message: 'Manager role quit successfully' });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.post('/api/manager/nominate', async (req, res) => {
+  const { managerId, playerId } = req.body;
+  if (!req.headers['manager-id'] || req.headers['manager-id'] !== String(managerId)) {
+    return sendError(res, 403, 'Unauthorized manager action');
+  }
+  try {
+    const manager = await fetchSingle('managers', { id: managerId }, 'id, name, team_id');
+    if (!manager.team_id) return sendError(res, 400, 'Manager has no team');
+    const player = await fetchSingle('players', { id: playerId, team_id: manager.team_id }, 'id, name');
+    await supabase.from('managers').update({ team_id: null }).eq('id', managerId);
+    await supabase.from('managers').update({ team_id: manager.team_id }).eq('name', player.name);
+    await logAction(`Manager ${manager.name} nominated ${player.name} as new manager for team ${manager.team_id}`);
+    res.json({ message: `Nominated ${player.name} as new manager` });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.get('/api/teams', async (req, res) => {
+  const { data, error } = await supabase.from('teams').select('*');
+  if (error) return sendError(res, 500, error.message);
+  res.json(data);
+});
+
+app.get('/api/log', async (req, res) => {
+  const { lastId } = req.query;
+  const query = supabase.from('action_log').select('*').order('id', { ascending: false });
+  if (lastId) query.gt('id', lastId);
+  const { data, error } = await query;
+  if (error) return sendError(res, 500, error.message);
+  res.json(data);
+});
+
+app.get('/api/news', async (req, res) => {
+  const { data, error } = await supabase.from('news').select('*').order('timestamp', { ascending: false });
+  if (error) return sendError(res, 500, error.message);
+  res.json(data || []);
+});
+
+app.post('/api/admin/news', async (req, res) => {
+  if (!req.headers['admin-auth'] || req.headers['admin-auth'] !== 'true') {
+    return sendError(res, 403, 'Admin access required');
+  }
+  const { message } = req.body;
+  if (!message) return sendError(res, 400, 'Message is required');
+  try {
+    const { data, error } = await supabase.from('news').insert({ message, timestamp: new Date().toISOString() }).select().single();
+    if (error) throw new Error(error.message);
+    res.json({ message: 'News posted successfully' });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.get('/api/counts', async (req, res) => {
+  try {
+    const { data: players } = await supabase.from('players').select('id, team_id');
+    const { data: managers } = await supabase.from('managers').select('id, team_id');
+    const { data: bids } = await supabase.from('bids').select('id');
+    const playerCount = players.filter(p => p.team_id).length;
+    const managerCount = managers.filter(m => m.team_id).length;
+    const totalBids = bids.length;
+    const waiverCount = players.filter(p => !p.team_id).length;
+    res.json({ playerCount, managerCount, totalBids, waiverCount });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.post('/api/admin/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
+    return sendError(res, 401, 'Invalid admin credentials');
+  }
+  res.json({ message: 'Admin logged in successfully' });
+});
+
+app.post('/api/admin/logout', async (req, res) => {
+  if (!req.headers['admin-auth'] || req.headers['admin-auth'] !== 'true') {
+    return sendError(res, 403, 'Admin access required');
+  }
+  res.json({ message: 'Admin logged out successfully' });
+});
+
+app.post('/api/admin/add-player', async (req, res) => {
+  if (!req.headers['admin-auth'] || req.headers['admin-auth'] !== 'true') {
+    return sendError(res, 403, 'Admin access required');
+  }
+  const { name, password, salary } = req.body;
+  if (!name || !password || !salary) return sendError(res, 400, 'Missing required fields');
+  try {
+    const { data, error } = await supabase.from('players').insert({ name, password, salary }).select().single();
+    if (error) throw new Error(error.message);
+    await logAction(`New player ${name} added by admin with salary $${salary}`);
+    res.json({ message: `Player ${name} added with salary $${salary}` });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.post('/api/admin/update-salary', async (req, res) => {
+  if (!req.headers['admin-auth'] || req.headers['admin-auth'] !== 'true') {
+    return sendError(res, 403, 'Admin access required');
+  }
+  const { playerId, newSalary } = req.body;
+  try {
+    const player = await fetchSingle('players', { id: playerId }, 'id, name, salary');
+    await supabase.from('players').update({ salary: newSalary }).eq('id', playerId);
+    await logAction(`Salary for Player ID ${playerId} updated to $${newSalary} by admin`);
+    res.json({ message: `Player ${player.name} salary updated to $${newSalary}` });
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
+app.post('/api/admin/manage-manager', async (req, res) => {
+  if (!req.headers['admin-auth'] || req.headers['admin-auth'] !== 'true') {
+    return sendError(res, 403, 'Admin access required');
+  }
+  const { action, managerId, playerId } = req.body;
+  try {
+    if (action === 'remove') {
+      const manager = await fetchSingle('managers', { id: managerId }, 'id, name');
+      await supabase.from('managers').update({ team_id: null }).eq('id', managerId);
+      await logAction(`Manager ${manager.name} removed by admin`);
+      res.json({ message: `Manager ${manager.name} removed` });
+    } else if (action === 'nominate') {
+      const player = await fetchSingle('players', { id: playerId }, 'id, name, team_id');
+      if (!player.team_id) return sendError(res, 400, 'Player must be on a team');
+      const { data: currentManager } = await supabase.from('managers').select('id, name').eq('team_id', player.team_id).single();
+      if (currentManager) {
+        await supabase.from('managers').update({ team_id: null }).eq('id', currentManager.id);
+      }
+      await supabase.from('managers').update({ team_id: player.team_id }).eq('name', player.name);
+      await logAction(`Player ${player.name} nominated as manager for team ${player.team_id} by admin`);
+      res.json({ message: `Player ${player.name} nominated as manager` });
+    } else {
+      sendError(res, 400, 'Invalid action');
+    }
+  } catch (error) {
+    sendError(res, 500, error.message);
+  }
+});
+
 app.post('/api/bids', async (req, res) => {
   const { playerId, teamId, amount } = req.body;
   try {
@@ -85,3 +398,5 @@ app.post('/api/bids/reject', async (req, res) => {
     sendError(res, 500, error.message);
   }
 });
+
+app.listen(process.env.PORT || 3000, () => console.log(`Server running on port ${process.env.PORT || 3000}`));
