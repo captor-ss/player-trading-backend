@@ -199,18 +199,52 @@ app.post('/api/manager/nominate', async (req, res) => {
 
 app.post('/api/managers/set-team-name', async (req, res) => {
   const { managerId, teamName } = req.body;
-  if (!req.headers['manager-id'] || req.headers['manager-id'] !== String(managerId)) {
-    return sendError(res, 403, 'Unauthorized manager action');
-  }
   try {
-    const manager = await fetchSingle('managers', { id: managerId }, 'id, name, team_id');
-    if (!manager.team_id) return sendError(res, 400, 'Manager has no team assigned');
-    const { error } = await supabase.from('teams').update({ name: teamName }).eq('id', manager.team_id);
-    if (error) throw new Error(error.message);
-    await logAction(`Manager ${manager.name} set team name to ${teamName}`);
-    res.json({ message: `Team name set to ${teamName}` });
+    if (!req.headers['manager-id'] || req.headers['manager-id'] !== managerId) {
+      return sendError(res, 403, 'Unauthorized');
+    }
+    if (!teamName) {
+      return sendError(res, 400, 'Team name is required');
+    }
+    // Check if manager exists
+    const { data: manager, error: managerError } = await supabase
+      .from('managers')
+      .select('id, team_id')
+      .eq('id', managerId)
+      .single();
+    if (managerError || !manager) throw new Error('Manager not found');
+
+    if (manager.team_id) {
+      // Update existing team name
+      const { error } = await supabase
+        .from('teams')
+        .update({ name: teamName })
+        .eq('id', manager.team_id);
+      if (error) throw new Error(error.message);
+      await logAction(`Manager ${managerId} updated team name to ${teamName}`);
+      res.json({ message: `Team name updated to ${teamName}` });
+    } else {
+      // Create new team
+      const defaultBudget = 100000;
+      const { data: newTeam, error: teamError } = await supabase
+        .from('teams')
+        .insert({ name: teamName, budget: defaultBudget })
+        .select('id')
+        .single();
+      if (teamError) throw new Error(teamError.message);
+
+      // Link manager to new team
+      const { error: updateError } = await supabase
+        .from('managers')
+        .update({ team_id: newTeam.id })
+        .eq('id', managerId);
+      if (updateError) throw new Error(updateError.message);
+
+      await logAction(`Manager ${managerId} created team ${teamName}`);
+      res.json({ message: `Team ${teamName} created successfully` });
+    }
   } catch (error) {
-    sendError(res, 500, error.message);
+    sendError(res, error.message.includes('not found') ? 404 : 500, error.message);
   }
 });
 
@@ -312,96 +346,92 @@ app.post('/api/admin/update-salary', async (req, res) => {
 });
 
 app.post('/api/admin/manage-manager', async (req, res) => {
-  if (!req.headers['admin-auth'] || req.headers['admin-auth'] !== 'true') {
-    return sendError(res, 403, 'Admin access required');
-  }
   const { action, managerId, playerId } = req.body;
   try {
-    if (action === 'remove') {
-      const manager = await fetchSingle('managers', { id: managerId }, 'id, name');
-      await supabase.from('managers').update({ team_id: null }).eq('id', managerId);
-      await logAction(`Manager ${manager.name} removed by admin`);
-      res.json({ message: `Manager ${manager.name} removed` });
-    } else if (action === 'nominate') {
-      if (!playerId) return sendError(res, 400, 'Player is required');
-      const player = await fetchSingle('players', { id: playerId }, 'id, name');
-      
-      // Check if the player is already a manager
-      const { data: existingManager, error: managerError } = await supabase.from('managers').select('id').eq('name', player.name).maybeSingle();
-      if (managerError) throw new Error(`Manager query failed: ${managerError.message}`);
-      let newManagerId;
-      let defaultPassword = null;
-      if (!existingManager) {
-        defaultPassword = 'defaultPass123'; // Temporary password for new managers
-        const { data: newManager, error: insertError } = await supabase
-          .from('managers')
-          .insert({ name: player.name, password: defaultPassword })
-          .select('id')
-          .single();
-        if (insertError) throw new Error(`Failed to create manager: ${insertError.message}`);
-        console.log(`New manager created for ${player.name} with temporary password: ${defaultPassword}`); // Debug log
-        newManagerId = newManager.id;
-      } else {
-        newManagerId = existingManager.id;
-      }
+    if (!req.headers['admin-auth']) {
+      return sendError(res, 403, 'Admin access required');
+    }
+    if (action === 'remove' && managerId) {
+      const { error } = await supabase
+        .from('managers')
+        .update({ team_id: null })
+        .eq('id', managerId);
+      if (error) throw new Error(error.message);
+      await logAction(`Manager ${managerId} removed from team`);
+      return res.json({ message: 'Manager removed successfully' });
+    } else if (action === 'nominate' && playerId) {
+      // Check if player exists
+      const { data: player, error: playerError } = await supabase
+        .from('players')
+        .select('id, name')
+        .eq('id', playerId)
+        .single();
+      if (playerError || !player) throw new Error('Player not found');
 
-      // Find an available team (not assigned to any manager)
-      const { data: managersWithTeams } = await supabase.from('managers').select('team_id').not('team_id', 'is', null);
-      const assignedTeamIds = managersWithTeams.map(m => m.team_id) || [];
-      console.log('Assigned Team IDs:', assignedTeamIds); // Debug log
-      const { data: availableTeams, error: teamQueryError } = await supabase
+      // Create a new team with default name and budget
+      const defaultTeamName = `${player.name}'s Team`;
+      const defaultBudget = 100000; // Default budget for new teams
+      const { data: newTeam, error: teamError } = await supabase
         .from('teams')
+        .insert({ name: defaultTeamName, budget: defaultBudget })
         .select('id')
-        .not('id', 'in', `(${assignedTeamIds.length ? assignedTeamIds.join(',') : '0'})`);
-      if (teamQueryError) throw new Error(`Team query failed: ${teamQueryError.message}`);
-      console.log('Available Teams:', availableTeams); // Debug log
+        .single();
+      if (teamError) throw new Error(teamError.message);
 
-      let teamId;
-      if (availableTeams && availableTeams.length > 0) {
-        teamId = availableTeams[0].id; // Take the first available team
-      } else {
-        // Create a new team with a starting budget of $500,000
-        const timestamp = Date.now();
-        const newTeamName = `Team ${player.name} ${timestamp}`; // Ensure unique name
-        const { data: newTeam, error: teamInsertError } = await supabase
-          .from('teams')
-          .insert({ name: newTeamName, budget: 500000 })
-          .select('id')
-          .single();
-        if (teamInsertError) throw new Error(`Failed to create team: ${teamInsertError.message}`);
-        console.log('New Team Created:', newTeam); // Debug log
-        teamId = newTeam.id;
+      // Check if player is already a manager
+      const { data: existingManager, error: managerError } = await supabase
+        .from('managers')
+        .select('id')
+        .eq('name', player.name)
+        .single();
+      if (managerError && !managerError.message.includes('No rows found')) {
+        throw new Error(managerError.message);
       }
 
-      // Assign the team to the manager
-      const { error: updateError } = await supabase.from('managers').update({ team_id: teamId }).eq('id', newManagerId);
-      if (updateError) throw new Error(`Failed to assign team: ${updateError.message}`);
-      console.log(`Manager ${player.name} assigned to team ${teamId}`); // Debug log
+      if (existingManager) {
+        // Update existing manager's team_id
+        const { error: updateError } = await supabase
+          .from('managers')
+          .update({ team_id: newTeam.id })
+          .eq('id', existingManager.id);
+        if (updateError) throw new Error(updateError.message);
+      } else {
+        // Create new manager
+        const { error: insertError } = await supabase
+          .from('managers')
+          .insert({ name: player.name, password: 'default_password', team_id: newTeam.id }); // Use a secure default or prompt for password
+        if (insertError) throw new Error(insertError.message);
+      }
 
-      // Fetch the assigned team name for confirmation
-      const { data: assignedTeam } = await supabase.from('teams').select('name').eq('id', teamId).single();
-      console.log(`Assigned Team Name for ${player.name}:`, assignedTeam.name); // Debug log
-
-      await logAction(`Player ${player.name} nominated as manager by admin for team ${teamId}`);
-      const message = defaultPassword
-        ? `Player ${player.name} nominated as manager. Temporary password: ${defaultPassword}`
-        : `Player ${player.name} nominated as manager (already had credentials).`;
-      res.json({ message });
+      await logAction(`Player ${player.name} nominated as manager with team ${newTeam.id}`);
+      res.json({ message: `Player ${player.name} nominated as manager with team ${defaultTeamName}` });
     } else {
-      sendError(res, 400, 'Invalid action');
+      sendError(res, 400, 'Invalid action or parameters');
     }
   } catch (error) {
-    console.error('Error Details:', error); // Debug log
-    sendError(res, 500, error.message);
+    sendError(res, error.message.includes('not found') ? 404 : 500, error.message);
   }
 });
 
 app.post('/api/bids', async (req, res) => {
   const { playerId, teamId, amount } = req.body;
   try {
+    // Verify team exists and has a manager
+    const { data: team, error: teamError } = await supabase
+      .from('teams')
+      .select('id, budget')
+      .eq('id', teamId)
+      .single();
+    if (teamError || !team) throw new Error('Team not found');
+    const { data: manager, error: managerError } = await supabase
+      .from('managers')
+      .select('id')
+      .eq('team_id', teamId)
+      .single();
+    if (managerError || !manager) throw new Error('Team has no manager');
+
     const player = await fetchSingle('players', { id: playerId }, 'id, name, team_id');
     if (player.team_id) return sendError(res, 400, 'Player already on a team');
-    const team = await fetchSingle('teams', { id: teamId }, 'id, name, budget');
     if (team.budget < amount) return sendError(res, 400, 'Insufficient budget');
     const { data: existingBid } = await supabase.from('bids').select('id').eq('player_id', playerId).eq('team_id', teamId).single();
     if (existingBid) return sendError(res, 400, 'Bid already placed by this team');
