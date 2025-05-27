@@ -1,7 +1,7 @@
 let currentManager = null;
 let currentPlayer = null;
 let currentAdmin = false;
-const API_URL = "https://player-trading-backend.onrender.com";
+const API_URL = "https://player-trading-backend.supabase.co/rest/v1";
 let activeTab = 'info';
 let teams = [];
 let players = [];
@@ -37,9 +37,15 @@ const fetchData = async (endpoint, query = {}) => {
 
 const postData = async (endpoint, data, headers = {}) => {
   try {
-    const res = await fetch(`${API_URL}/api/${endpoint}`, {
+    const res = await fetch(`${API_URL}/${endpoint}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...headers, ...(currentAdmin ? { 'admin-auth': 'true' } : {}) },
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN0anZkaGhhYm5lZnpvYWZ6cGRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDgxMTcwNTUsImV4cCI6MjA2MzY5MzA1NX0.3eUla2G9QJmRqOWX7ZdVCWoEwt8OG6ij3gKJJgnjc_Y', // Add your Supabase anon key
+        'Authorization': `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN0anZkaGhhYm5lZnpvYWZ6cGRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDgxMTcwNTUsImV4cCI6MjA2MzY5MzA1NX0.3eUla2G9QJmRqOWX7ZdVCWoEwt8OG6ij3gKJJgnjc_Y`, // For authenticated requests
+        ...headers,
+        ...(currentAdmin ? { 'admin-auth': 'true' } : {})
+      },
       body: JSON.stringify(data),
     });
     if (!res.ok) {
